@@ -62,7 +62,7 @@ func (p *Pool) H2Get(host string) *http2.ClientConn {
 	for i := len(conns) - 1; i >= 0; i-- {
 		c := conns[i]
 		state := c.cc.State()
-		if state.Closed || !state.CanTakeNewRequest {
+		if state.Closed {
 			c.cc.Close()
 			conns = append(conns[:i], conns[i+1:]...)
 			continue
@@ -171,8 +171,7 @@ func (p *Pool) cleanup() {
 		kept := conns[:0]
 		for _, c := range conns {
 			state := c.cc.State()
-			if state.Closed || !state.CanTakeNewRequest ||
-				now.Sub(c.created) > p.maxAge {
+			if state.Closed || now.Sub(c.created) > p.maxAge {
 				c.cc.Close()
 			} else {
 				kept = append(kept, c)
