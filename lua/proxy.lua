@@ -1,14 +1,32 @@
 -- ════════════════════════════════════════════════════════════════
 -- LitePipe — Transparent URL-rewriting proxy module
--- v3 — Bug bounty fixed: overflow, relative URLs, JS interceptor,
---       host:port parsing, cache key
+-- v4 — Base64-encoded target URLs (fixes nginx // collapse)
 -- ════════════════════════════════════════════════════════════════
 
 local M = {}
 
 -- ───────────────────────────────────────────────────────────────
+-- Base64 URL-safe encode/decode
+-- Glype/CroxyProxy pattern: encode target URL to avoid // in path
+-- ───────────────────────────────────────────────────────────────
+local function b64_encode(str)
+    local b = ngx.encode_base64(str)
+    -- URL-safe: + → -, / → _, strip =
+    b = b:gsub("+", "-"):gsub("/", "_"):gsub("=+$", "")
+    return b
+end
+
+local function b64_decode(str)
+    -- Restore standard base64: - → +, _ → /
+    local b = str:gsub("-", "+"):gsub("_", "/")
+    -- Re-add padding
+    local pad = (4 - #b % 4) % 4
+    b = b .. string.rep("=", pad)
+    return ngx.decode_base64(b)
+end
+
+-- ───────────────────────────────────────────────────────────────
 -- RFC 3986 Path Resolver
--- [BUGFIX #3] Relative URLs now resolved against page path
 -- ───────────────────────────────────────────────────────────────
 local function resolve_path(base_path, rel_url)
     if rel_url:match("^/") then return rel_url end
@@ -18,7 +36,6 @@ local function resolve_path(base_path, rel_url)
         table.insert(segments, seg)
     end
 
-    -- If base doesn't end with /, last segment is a "file" — remove it
     if not base_path:match("/$") then
         table.remove(segments)
     end
@@ -27,7 +44,7 @@ local function resolve_path(base_path, rel_url)
         if seg == "." then
             -- skip
         elseif seg == ".." then
-            table.remove(segments) -- Lua table.remove on empty is safe
+            table.remove(segments)
         else
             table.insert(segments, seg)
         end
@@ -37,38 +54,81 @@ local function resolve_path(base_path, rel_url)
 end
 
 -- ───────────────────────────────────────────────────────────────
+-- PROXY URL — convert any URL to /browse/b64:... form
+-- ───────────────────────────────────────────────────────────────
+local function proxy_url(url, dest_host, dest_proto, page_path)
+    if not url or url == "" then return url end
+    if url:match("^/browse/") then return url end
+
+    local full_url
+
+    if url:match("^https?://") then
+        full_url = url
+    elseif url:match("^//") then
+        full_url = dest_proto .. ":" .. url
+    elseif url:match("^/") then
+        full_url = dest_proto .. "://" .. dest_host .. url
+    elseif page_path and page_path ~= "/" then
+        local resolved = resolve_path(page_path, url)
+        full_url = dest_proto .. "://" .. dest_host .. resolved
+    else
+        full_url = dest_proto .. "://" .. dest_host .. "/" .. url
+    end
+
+    return "/browse/b64:" .. b64_encode(full_url)
+end
+
+-- ───────────────────────────────────────────────────────────────
 -- ACCESS PHASE — parse target URL from request path
--- [BUGFIX #8] Host parsing now captures host:port
 -- ───────────────────────────────────────────────────────────────
 function M.access()
-    -- Use request_uri (raw) not uri (nginx normalizes // → /)
     local req_uri = ngx.var.request_uri
-    local target = req_uri:match("^/browse/(.+)$")
+    local path_part = req_uri:match("^/browse/(.+)$")
 
-    if not target then
+    if not path_part then
         ngx.exit(ngx.HTTP_NOT_FOUND)
         return
     end
 
-    -- request_uri already includes query string, no need to append args
+    -- Strip query string if present
+    local target
+    if path_part:match("^b64:") then
+        -- Base64-encoded URL (new format)
+        local b64 = path_part:match("^b64:([^?]+)")
+        if not b64 then
+            ngx.exit(ngx.HTTP_BAD_REQUEST)
+            return
+        end
+        target = b64_decode(b64)
+        if not target then
+            ngx.exit(ngx.HTTP_BAD_REQUEST)
+            return
+        end
+        -- Re-attach query string if present in original request
+        local qs = path_part:match("b64:[^?]+%?(.+)$")
+        if qs then
+            target = target .. "?" .. qs
+        end
+    else
+        -- Legacy raw URL format (for backward compat)
+        target = path_part
+        -- Remove query string for parsing, re-add later
+    end
 
-    -- [BUGFIX #8] Capture host:port (stop at first / not at :)
     local protocol, hostport = target:match("^(https?)://([^/]+)")
     if not hostport then
         ngx.exit(ngx.HTTP_BAD_REQUEST)
         return
     end
 
-    -- Extract pure hostname for SNI (Go handles TLS, needs hostname only)
     local hostname = hostport:match("^([^:]+)") or hostport
 
-    -- [BUGFIX #3] Extract page path for relative URL resolution
     local page_path = target:match("^https?://[^/]+([^?]*)") or "/"
     if page_path == "" then page_path = "/" end
 
     ngx.ctx.target_url = target
-    ngx.ctx.dest_host = hostport        -- host:port for Host header
-    ngx.ctx.dest_hostname = hostname    -- hostname for SNI
+    ngx.ctx.dest_host = hostport
+    ngx.ctx.dest_hostname = hostname
     ngx.ctx.dest_protocol = protocol or "https"
     ngx.ctx.page_path = page_path
 
@@ -87,11 +147,13 @@ function M.header_filter()
     local loc = ngx.header["Location"]
     if loc then
         if loc:match("^https?://") then
-            ngx.header["Location"] = "/browse/" .. loc
+            ngx.header["Location"] = "/browse/b64:" .. b64_encode(loc)
         elseif loc:match("^/") then
-            ngx.header["Location"] = "/browse/" .. dest_proto .. "://" .. dest_host .. loc
+            local full = dest_proto .. "://" .. dest_host .. loc
+            ngx.header["Location"] = "/browse/b64:" .. b64_encode(full)
         elseif loc:match("^%./") then
-            ngx.header["Location"] = "/browse/" .. dest_proto .. "://" .. dest_host .. "/" .. loc:sub(3)
+            local full = dest_proto .. "://" .. dest_host .. "/" .. loc:sub(3)
+            ngx.header["Location"] = "/browse/b64:" .. b64_encode(full)
         end
     end
 
@@ -120,8 +182,7 @@ function M.header_filter()
     ngx.header["Cross-Origin-Resource-Policy"]        = nil
     ngx.header["Permissions-Policy"]                  = nil
 
-    -- Strip Content-Length for HTML/CSS — body_filter rewrites and changes size.
-    -- Must be removed here because headers are flushed before body_filter runs.
+    -- Strip Content-Length for HTML/CSS — body_filter rewrites and changes size
     local ct = ngx.var.content_type or ""
     if ct:match("text/html") or ct:match("application/xhtml") or ct:match("text/css") then
         ngx.header["Content-Length"] = nil
@@ -130,28 +191,8 @@ function M.header_filter()
 end
 
 -- ───────────────────────────────────────────────────────────────
--- URL PROXIFIER — rewrite any URL to proxied form
--- [BUGFIX #3] Now handles relative URLs via path resolution
--- ───────────────────────────────────────────────────────────────
-local function proxy_url(url, dest_host, dest_proto, page_path)
-    if not url or url == "" then return url end
-    if url:match("^/browse/") then return url end
-    if url:match("^https?://") then return "/browse/" .. url end
-    if url:match("^//") then return "/browse/" .. dest_proto .. ":" .. url end
-    if url:match("^/") then return "/browse/" .. dest_proto .. "://" .. dest_host .. url end
-    -- Relative URL — resolve against page_path
-    if page_path and page_path ~= "/" then
-        local resolved = resolve_path(page_path, url)
-        return "/browse/" .. dest_proto .. "://" .. dest_host .. resolved
-    end
-    -- Fallback: treat as root-relative
-    return "/browse/" .. dest_proto .. "://" .. dest_host .. "/" .. url
-end
-
--- ───────────────────────────────────────────────────────────────
 -- JS INTERCEPTOR — injected into HTML <head>
--- [BUGFIX #4] Fixed !v.indexOf===0 → v.indexOf!==0
--- [BUGFIX #3] Added resolvePath for relative URL handling
+-- Uses btoa() for base64 encoding in browser
 -- ───────────────────────────────────────────────────────────────
 local function build_interceptor(dest_host, dest_proto, page_path)
     return string.format(
@@ -159,7 +200,11 @@ local function build_interceptor(dest_host, dest_proto, page_path)
 <script>
 (function(){
 "use strict";
-var P="/browse/",H="%s",PR="%s",PP="%s";
+var H="%s",PR="%s",PP="%s";
+
+function b64(s){
+return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
 
 function resolvePath(base,rel){
 var segs=base.split("/").filter(function(s){return s.length>0;});
@@ -178,14 +223,13 @@ if(!u)return u;
 if(typeof u!=="string")return u;
 if(u.indexOf("data:")===0||u.indexOf("blob:")===0||u.indexOf("javascript:")===0||u.indexOf("chrome-extension:")===0||u.indexOf("about:")===0||u.indexOf("mailto:")===0||u.indexOf("tel:")===0)return u;
 if(u.indexOf("/browse/")===0)return u;
-if(u.indexOf("http://")===0||u.indexOf("https://")===0)return P+u;
-if(u.indexOf("//")===0)return P+PR+":"+u;
-if(u.indexOf("/")===0)return P+PR+"://"+H+u;
-if(PP){
-var resolved=resolvePath(PP,u);
-return P+PR+"://"+H+resolved;
-}
-return u;
+var full;
+if(u.indexOf("http://")===0||u.indexOf("https://")===0)full=u;
+else if(u.indexOf("//")===0)full=PR+":"+u;
+else if(u.indexOf("/")===0)full=PR+"://"+H+u;
+else if(PP)full=PR+"://"+H+resolvePath(PP,u);
+else return u;
+return "/browse/b64:"+b64(full);
 }
 window.__dsProxy=pu;
 
@@ -234,7 +278,6 @@ if(!el||el.nodeType!==1)return;
 var attrs=["src","href","data-src","poster","action","data-srcset","formaction"];
 for(var ai=0;ai<attrs.length;ai++){
 var v=el.getAttribute(attrs[ai]);
-// [BUGFIX #4] was !v.indexOf===0 (always false), now correct
 if(v&&v.indexOf("/browse/")!==0){
 var pv=pu(v);
 if(pv!==v)el.setAttribute(attrs[ai],pv);
@@ -245,7 +288,6 @@ var kids=el.querySelectorAll("[src],[href],[data-src],[poster],[action],[data-sr
 for(var ki=0;ki<kids.length;ki++){
 for(var ai2=0;ai2<attrs.length;ai2++){
 var kv=kids[ki].getAttribute(attrs[ai2]);
-// [BUGFIX #4]
 if(kv&&kv.indexOf("/browse/")!==0){
 var kpv=pu(kv);
 if(kpv!==kv)kids[ki].setAttribute(attrs[ai2],kpv);
@@ -301,7 +343,6 @@ document.addEventListener("click",function(e){
 var a=e.target.closest?e.target.closest("a"):null;
 if(a&&a.href){
 var oh=a.getAttribute("href");
-// [BUGFIX #4]
 if(oh&&oh.indexOf("/browse/")!==0){
 a.setAttribute("href",pu(oh));
 }
@@ -437,7 +478,6 @@ end
 
 -- ───────────────────────────────────────────────────────────────
 -- BODY FILTER — buffer, rewrite, output
--- [BUGFIX #2] Overflow now switches to pass-through, no data loss
 -- ───────────────────────────────────────────────────────────────
 function M.body_filter()
     local ct = ngx.var.content_type or ""
@@ -449,7 +489,6 @@ function M.body_filter()
         return  -- Stream as-is (images, video, JS, binary)
     end
 
-    -- [BUGFIX #2] If overflow already triggered, pass through directly
     if ngx.ctx.overflow then
         return
     end
@@ -465,12 +504,10 @@ function M.body_filter()
     if chunk then
         ngx.ctx.body_size = ngx.ctx.body_size + #chunk
 
-        -- [BUGFIX #2] Overflow: flush buffer as-is, switch to pass-through
         if ngx.ctx.body_size > 5242880 then
             ngx.ctx.overflow = true
             local buffered = table.concat(ngx.ctx.body_chunks)
             ngx.ctx.body_chunks = nil
-            -- Output buffered content + current chunk without rewriting
             ngx.arg[1] = buffered .. chunk
             return
         end
@@ -483,7 +520,6 @@ function M.body_filter()
         return
     end
 
-    -- EOF — process and output
     local dest_host  = ngx.ctx.dest_host or ngx.var.dest_host or ""
     local dest_proto = ngx.ctx.dest_protocol or "https"
     local page_path  = ngx.ctx.page_path or "/"
