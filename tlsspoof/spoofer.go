@@ -30,7 +30,7 @@ func NewSpoofer(pool *Pool, dialTimeout time.Duration,
 
 // dialUTLS creates TCP conn, wraps in utls with browser fingerprint
 func (s *Spoofer) dialUTLS(ctx context.Context, host, port, ua string) (
-	utls.UConn, string, error) {
+	*utls.UConn, string, error) {
 
 	addr := net.JoinHostPort(host, port)
 
@@ -104,7 +104,8 @@ func (s *Spoofer) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	if proto == "h2" {
-		h2cc, err := http2.NewClientConn(uConn)
+		h2t := &http2.Transport{}
+		h2cc, err := h2t.NewClientConn(uConn)
 		if err != nil {
 			uConn.Close()
 			return nil, fmt.Errorf("h2 client conn: %w", err)
