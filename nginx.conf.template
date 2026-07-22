@@ -16,7 +16,7 @@ http {
     client_body_temp_path /tmp/client_body;
     proxy_temp_path       /tmp/proxy_temp;
 
-    access_log /dev/stdout buffer=32k flush=5s;
+    access_log /dev/stdout combined buffer=32k flush=5s;
 
     sendfile          on;
     tcp_nopush        on;
