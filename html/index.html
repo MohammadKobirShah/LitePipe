@@ -31,13 +31,7 @@ button:hover{background:#1ad9aa}
 <input type="text" id="url" placeholder="facebook.com, google.com, youtube.com..." autofocus>
 <button type="submit">Go</button>
 </form>
-<div class="bookmarks">
-<a href="/browse/https://facebook.com">Facebook</a>
-<a href="/browse/https://google.com">Google</a>
-<a href="/browse/https://youtube.com">YouTube</a>
-<a href="/browse/https://wikipedia.org">Wikipedia</a>
-<a href="/browse/https://reddit.com">Reddit</a>
-</div>
+<div class="bookmarks" id="bookmarks"></div>
 <div class="feat">
 <span>Gzip L9</span>
 <span>Original IP Preserved</span>
@@ -47,13 +41,30 @@ button:hover{background:#1ad9aa}
 </div>
 </div>
 <script>
+function b64url(s){
+return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
 function go(e){
 e.preventDefault();
 var u=document.getElementById('url').value.trim();
 if(!u)return;
 if(!u.match(/^https?:\/\//))u='https://'+u;
-window.location.href='/browse/'+u;
+window.location.href='/browse/b64:'+b64url(u);
 }
+var sites=[
+{label:'Facebook',url:'https://facebook.com'},
+{label:'Google',url:'https://google.com'},
+{label:'YouTube',url:'https://youtube.com'},
+{label:'Wikipedia',url:'https://wikipedia.org'},
+{label:'Reddit',url:'https://reddit.com'}
+];
+var bm=document.getElementById('bookmarks');
+sites.forEach(function(s){
+var a=document.createElement('a');
+a.href='/browse/b64:'+b64url(s.url);
+a.textContent=s.label;
+bm.appendChild(a);
+});
 </script>
 </body>
 </html>
