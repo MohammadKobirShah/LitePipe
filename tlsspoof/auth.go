@@ -83,7 +83,7 @@ func (m *AuthManager) StripAuthCookie(cookieHeader string) string {
 		if c == "" {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(c), "ds_auth=") {
+		if strings.HasPrefix(strings.ToLower(c), "_ds_auth=") {
 			continue
 		}
 		kept = append(kept, c)
@@ -93,6 +93,9 @@ func (m *AuthManager) StripAuthCookie(cookieHeader string) string {
 
 // MaskToken returns first 4 + ... + last 4 for safe display
 func MaskToken(t string) string {
+	if len(t) <= 2 {
+		return t + "..."
+	}
 	if len(t) <= 8 {
 		return t[:2] + "..."
 	}
