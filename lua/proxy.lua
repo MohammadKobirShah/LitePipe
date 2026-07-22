@@ -41,17 +41,16 @@ end
 -- [BUGFIX #8] Host parsing now captures host:port
 -- ───────────────────────────────────────────────────────────────
 function M.access()
-    local uri = ngx.var.uri
-    local target = uri:match("^/browse/(.+)$")
+    -- Use request_uri (raw) not uri (nginx normalizes // → /)
+    local req_uri = ngx.var.request_uri
+    local target = req_uri:match("^/browse/(.+)$")
 
     if not target then
         ngx.exit(ngx.HTTP_NOT_FOUND)
         return
     end
 
-    if ngx.var.args then
-        target = target .. "?" .. ngx.var.args
-    end
+    -- request_uri already includes query string, no need to append args
 
     -- [BUGFIX #8] Capture host:port (stop at first / not at :)
     local protocol, hostport = target:match("^(https?)://([^/]+)")
