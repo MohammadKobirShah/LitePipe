@@ -73,6 +73,7 @@ http {
     server {
         listen ${PORT};
         server_name _;
+        merge_slashes off;
 
         location = / {
             root /usr/local/openresty/nginx/html;
