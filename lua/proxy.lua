@@ -120,6 +120,14 @@ function M.header_filter()
     ngx.header["Cross-Origin-Embedder-Policy"]        = nil
     ngx.header["Cross-Origin-Resource-Policy"]        = nil
     ngx.header["Permissions-Policy"]                  = nil
+
+    -- Strip Content-Length for HTML/CSS — body_filter rewrites and changes size.
+    -- Must be removed here because headers are flushed before body_filter runs.
+    local ct = ngx.var.content_type or ""
+    if ct:match("text/html") or ct:match("application/xhtml") or ct:match("text/css") then
+        ngx.header["Content-Length"] = nil
+        ngx.header["Transfer-Encoding"] = "chunked"
+    end
 end
 
 -- ───────────────────────────────────────────────────────────────
@@ -495,7 +503,6 @@ function M.body_filter()
         body = rewrite_css(body, dest_host, dest_proto, page_path)
     end
 
-    ngx.header["Content-Length"] = #body
     ngx.arg[1] = body
 end
 
