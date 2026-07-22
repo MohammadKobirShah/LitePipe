@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: litepipe
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 80
+      - key: AUTH_TOKENS
+        value: mySecretToken:lo
+      - key: FP_CHROME
+        value: "120"
+    disk:
+      name: cache
+      mountPath: /tmp/cache
+      sizeGB: 1

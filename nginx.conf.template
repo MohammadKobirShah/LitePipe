@@ -1,0 +1,187 @@
+worker_processes auto;
+worker_rlimit_nofile 65535;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+
+events {
+    worker_connections 8192;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path       /tmp/proxy_temp;
+
+    access_log /dev/stdout buffer=32k flush=5s;
+
+    sendfile          on;
+    tcp_nopush        on;
+    tcp_nodelay       on;
+    sendfile_max_chunk 512k;
+
+    keepalive_timeout     45;
+    keepalive_requests    1000;
+    reset_timedout_connection on;
+
+    client_max_body_size       50m;
+    client_body_buffer_size    256k;
+    client_header_buffer_size  4k;
+    large_client_header_buffers 4 8k;
+
+    client_body_timeout   30;
+    client_header_timeout 15;
+    send_timeout          30;
+
+    gzip on;
+    gzip_comp_level 9;
+    gzip_min_length 256;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_buffers 32 8k;
+    gzip_types
+        text/plain text/css text/xml text/javascript
+        application/javascript application/x-javascript
+        application/json application/xml application/xml+rss
+        application/xhtml+xml application/rss+xml
+        application/atom+xml image/svg+xml
+        font/woff font/woff2 application/font-woff;
+
+    proxy_cache_path /tmp/cache
+        levels=1:2
+        keys_zone=ds:50m
+        max_size=500m
+        inactive=10m
+        use_temp_path=off;
+
+    limit_req_zone  $binary_remote_addr zone=ul:10m rate=30r/s;
+    limit_conn_zone $binary_remote_addr zone=cl:10m;
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      keep-alive;
+    }
+
+    resolver 8.8.8.8 1.1.1.1 8.8.4.4 valid=300s ipv6=off;
+    resolver_timeout 5s;
+
+    lua_package_path "/etc/openresty/lua/?.lua;;";
+
+    server {
+        listen ${PORT};
+        server_name _;
+
+        location = / {
+            root /usr/local/openresty/nginx/html;
+            index index.html;
+        }
+
+        location = /health {
+            access_log off;
+            return 200 "ok";
+            add_header Content-Type text/plain;
+        }
+
+        location = /login {
+            proxy_pass http://127.0.0.1:8081;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_pass_request_headers on;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+
+        location = /admin {
+            proxy_pass http://127.0.0.1:8081;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_pass_request_headers on;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+
+        location /purge/ {
+            allow 127.0.0.1;
+            deny all;
+            proxy_cache_purge ds "$target_url";
+        }
+
+        location /status {
+            stub_status on;
+            access_log off;
+            allow 127.0.0.1;
+            deny all;
+        }
+
+        # ════════════════════════════════════════════════════════════
+        # TRANSPARENT PROXY via Go TLS SPOOFER
+        # ════════════════════════════════════════════════════════════
+        location ~ ^/browse/(.+)$ {
+            set $target_url "";
+            set $dest_host  "";
+
+            limit_req zone=ul burst=50 nodelay;
+            limit_conn cl 10;
+
+            access_by_lua_block {
+                local proxy = require("proxy")
+                proxy.access()
+            }
+
+            proxy_pass http://127.0.0.1:8081;
+            proxy_http_version 1.1;
+
+            proxy_set_header X-Target-URL $target_url;
+            proxy_pass_request_headers on;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Host $dest_host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header Accept-Encoding "identity";
+
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_read_timeout 300s;
+
+            # [BUGFIX #1] Cache key uses $target_url not $proxy_host
+            # $proxy_host is always 127.0.0.1:8081 — was causing collisions
+            proxy_cache ds;
+            proxy_cache_valid 200 301 302 10m;
+            proxy_cache_valid 304 1m;
+            proxy_cache_valid 403 404 30s;
+            proxy_cache_use_stale
+                error timeout updating invalid_header
+                http_500 http_502 http_503 http_504;
+            proxy_cache_lock on;
+            proxy_cache_lock_timeout 15s;
+            proxy_cache_revalidate on;
+            proxy_cache_background_update on;
+            proxy_cache_key "$target_url";
+
+            proxy_buffering on;
+            proxy_buffer_size 16k;
+            proxy_buffers 64 16k;
+            proxy_busy_buffers_size 128k;
+            proxy_max_temp_file_size 100m;
+            proxy_temp_file_write_size 128k;
+
+            proxy_connect_timeout 10s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+
+            header_filter_by_lua_block {
+                local proxy = require("proxy")
+                proxy.header_filter()
+            }
+
+            body_filter_by_lua_block {
+                local proxy = require("proxy")
+                proxy.body_filter()
+            }
+        }
+
+        location = /favicon.ico {
+            access_log off;
+            return 204;
+        }
+    }
+}
