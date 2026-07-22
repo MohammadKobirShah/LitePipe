@@ -16,8 +16,6 @@ FROM openresty/openresty:1.25.3.1-bookworm
 
 COPY --from=go-builder /tlsspoof /usr/local/bin/tlsspoof
 
-RUN opm get ledgetech/lua-resty-http
-
 # cloudflared for optional Cloudflare Tunnel
 RUN curl -L -o /usr/local/bin/cloudflared \
     https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
