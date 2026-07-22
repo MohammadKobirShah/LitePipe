@@ -56,7 +56,7 @@ type Server struct {
 	spoofer *Spoofer
 	auth    AuthManager
 	stats   *Stats
-	pool    Pool
+	pool    *Pool
 	cfg     *Config
 }
 
