@@ -16,7 +16,7 @@ FROM openresty/openresty:1.25.3.1-bookworm
 
 COPY --from=go-builder /tlsspoof /usr/local/bin/tlsspoof
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
 # cloudflared for optional Cloudflare Tunnel
